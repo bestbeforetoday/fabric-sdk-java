@@ -32,8 +32,10 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -1276,21 +1278,27 @@ public class ServiceDiscovery {
         return ret.subList(Math.max(ret.size() - required, 0), ret.size());
     }
 
-    private ScheduledFuture<?> seviceDiscovery = null;
-
     private static final int SERVICE_DISCOVER_FREQ_SECONDS = config.getServiceDiscoveryFreqSeconds();
 
+    private final AtomicReference<ScheduledExecutorService> serviceDiscoveryExecutorService = new AtomicReference<>();
+
     void run() {
-        if (channel.isShutdown() || SERVICE_DISCOVER_FREQ_SECONDS < 1) {
+        if (channel.isShutdown() || SERVICE_DISCOVER_FREQ_SECONDS < 1 || serviceDiscoveryExecutorService.get() != null) {
             return;
         }
 
-        if (seviceDiscovery == null) {
-            seviceDiscovery = Executors.newSingleThreadScheduledExecutor(r -> {
+        synchronized (this) {
+            if (serviceDiscoveryExecutorService.get() != null) {
+                return;
+            }
+
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = Executors.defaultThreadFactory().newThread(r);
                 t.setDaemon(true);
                 return t;
-            }).scheduleAtFixedRate(() -> {
+            });
+            serviceDiscoveryExecutorService.set(executor);
+            executor.scheduleAtFixedRate(() -> {
                 logger.debug(format("Channel %s starting service rediscovery after %d seconds.", channelName, SERVICE_DISCOVER_FREQ_SECONDS));
                 fullNetworkDiscovery(true);
 
@@ -1337,15 +1345,14 @@ public class ServiceDiscovery {
 
     void shutdown() {
         logger.trace("Service discovery shutdown.");
-        try {
-            final ScheduledFuture<?> lseviceDiscovery = seviceDiscovery;
-            seviceDiscovery = null;
-            if (null != lseviceDiscovery) {
-                lseviceDiscovery.cancel(true);
+        ScheduledExecutorService executor = serviceDiscoveryExecutorService.getAndSet(null);
+        if (executor != null) {
+            try {
+                executor.shutdownNow();
+            } catch (Exception e) {
+                logger.error(e);
+                //best effort.
             }
-        } catch (Exception e) {
-            logger.error(e);
-            //best effort.
         }
     }
 
